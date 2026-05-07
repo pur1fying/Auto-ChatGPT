@@ -213,30 +213,22 @@ def click_rename_menu_item(driver, timeout=10):
 
     return wait.until(_click)
 
-def get_rename_title_input(driver, timeout=10):
+def get_sidebar_rename_editor(driver, timeout=10):
     """
-    Find rename input safely.
+    Find rename editor only inside #history.
 
-    Do not search global textarea/contenteditable,
-    otherwise it may match the ChatGPT message composer.
+    Never return ChatGPT composer input.
     """
     wait = WebDriverWait(driver, timeout)
 
-    input_selectors = [
-        'div[role="dialog"] input[type="text"]',
-        'div[role="dialog"] input',
-        '[data-radix-dialog-content] input[type="text"]',
-        '[data-radix-dialog-content] input',
-        '[role="menu"] input[type="text"]',
-        '[role="menu"] input',
-        '[data-radix-menu-content] input[type="text"]',
-        '[data-radix-menu-content] input',
-        'div[data-state="open"] input[type="text"]',
-        'div[data-state="open"] input',
+    selectors = [
+        '#history input[name="title-editor"][aria-label="聊天标题"]',
+        '#history input[name="title-editor"]',
+        '#history input[aria-label="聊天标题"]',
     ]
 
-    def _find_input(d):
-        for selector in input_selectors:
+    def _find_editor(d):
+        for selector in selectors:
             try:
                 elements = d.find_elements(By.CSS_SELECTOR, selector)
 
@@ -251,51 +243,42 @@ def get_rename_title_input(driver, timeout=10):
 
         return False
 
-    return wait.until(_find_input)
+    return wait.until(_find_editor)
 
-
-def set_title_input_text(driver, title_input, new_title):
+def set_sidebar_rename_editor_text(driver, new_title, timeout=10):
     """
-    Set title into the rename input and press Enter.
+    Set title only into sidebar rename editor.
     """
-    title_input.click()
-    time.sleep(0.2)
+    editor = get_sidebar_rename_editor(driver, timeout=timeout)
 
-    try:
-        title_input.send_keys(Keys.CONTROL, "a")
-        title_input.send_keys(new_title)
-        title_input.send_keys(Keys.ENTER)
-        return True
-    except Exception:
-        pass
+    editor.click()
+    editor.send_keys(Keys.CONTROL, "a")
+    editor.send_keys(new_title)
+    editor.send_keys(Keys.ENTER)
 
-    driver.execute_script(
-        """
-        const element = arguments[0];
-        const text = arguments[1];
-
-        element.focus();
-
-        if (element.tagName.toLowerCase() === 'textarea' || element.tagName.toLowerCase() === 'input') {
-            element.value = text;
-            element.dispatchEvent(new Event('input', { bubbles: true }));
-            element.dispatchEvent(new Event('change', { bubbles: true }));
-        } else {
-            element.textContent = text;
-            element.dispatchEvent(new InputEvent('input', {
-                bubbles: true,
-                inputType: 'insertText',
-                data: text
-            }));
-        }
-        """,
-        title_input,
-        new_title,
-    )
-
-    title_input.send_keys(Keys.ENTER)
     return True
 
+def rename_current_chat(driver, new_title):
+    """Rename current conversation to the relative image name."""
+    print(f"Renaming chat to: {new_title}")
+
+    new_title = safe_filename(new_title, max_len=100)
+
+    try:
+        open_current_chat_options_menu(driver, timeout=30)
+        click_rename_menu_item(driver, timeout=10)
+        set_sidebar_rename_editor_text(driver, new_title, timeout=10)
+
+        if wait_chat_title_updated(driver, new_title, timeout=10):
+            print("Rename confirmed")
+        else:
+            print("Rename attempted, but title update was not confirmed")
+
+        return True
+
+    except Exception as e:
+        print(f"Warning: failed to rename chat: {e}")
+        return False
 
 def wait_chat_title_updated(driver, new_title, timeout=10):
     """
@@ -323,8 +306,7 @@ def rename_current_chat(driver, new_title):
     try:
         open_current_chat_options_menu(driver, timeout=30)
         click_rename_menu_item(driver, timeout=10)
-        set_title_by_keyboard(driver, new_title)
-
+        set_sidebar_rename_editor_text(driver, new_title, timeout=10)
         if wait_chat_title_updated(driver, new_title, timeout=10):
             print("Rename confirmed")
         else:
@@ -336,20 +318,3 @@ def rename_current_chat(driver, new_title):
         print(f"Warning: failed to rename chat: {e}")
         return False
 
-def set_title_by_keyboard(driver, new_title):
-    """
-    After clicking rename, ChatGPT focuses the inline title editor.
-    Use keyboard actions directly to avoid stale element reference.
-    """
-    actions = ActionChains(driver)
-
-    actions.key_down(Keys.CONTROL)
-    actions.send_keys("a")
-    actions.key_up(Keys.CONTROL)
-
-    actions.send_keys(new_title)
-    actions.send_keys(Keys.ENTER)
-
-    actions.perform()
-
-    return True

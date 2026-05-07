@@ -1,264 +1,261 @@
-import time
-
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException
+
+from utils.logger import logger
 
 
 TURN_SELECTOR = 'section[data-testid^="conversation-turn-"]'
 USER_TURN_SELECTOR = 'section[data-testid^="conversation-turn-"][data-turn="user"]'
 ASSISTANT_TURN_SELECTOR = 'section[data-testid^="conversation-turn-"][data-turn="assistant"]'
 
+STOP_BUTTON_SELECTORS = [
+    '#composer-submit-button[data-testid="stop-button"]',
+    '#composer-submit-button[aria-label*="停止"]',
+    '#composer-submit-button[aria-label*="Stop" i]',
+]
 
-def get_chat_all_turn_cnt(driver):
-    """
-    Count all turns in the current chat main area.
-    Includes both user turns and assistant turns.
-    This is NOT the sidebar history count.
-    """
-    return len(driver.find_elements(By.CSS_SELECTOR, TURN_SELECTOR))
-
-
-def get_chat_user_turn_cnt(driver):
-    """
-    Count user turns in the current chat main area.
-    """
-    return len(driver.find_elements(By.CSS_SELECTOR, USER_TURN_SELECTOR))
+SPEECH_BUTTON_SELECTORS = [
+    'button[aria-label="启动语音功能"]',
+    'button[aria-label*="启动语音功能"]',
+    'button[aria-label*="voice" i]',
+    'button[aria-label*="speech" i]',
+]
 
 
-def get_chat_assistant_turn_cnt(driver):
-    """
-    Count assistant turns in the current chat main area.
-    """
-    return len(driver.find_elements(By.CSS_SELECTOR, ASSISTANT_TURN_SELECTOR))
+def _find_all(driver, selectors):
+    elements = []
+
+    if isinstance(selectors, str):
+        selectors = [selectors]
+
+    for selector in selectors:
+        try:
+            elements.extend(driver.find_elements(By.CSS_SELECTOR, selector))
+        except Exception:
+            continue
+
+    return elements
 
 
-def get_latest_chat_user_turn(driver):
-    """
-    Get the latest user turn in the current chat main area.
-    """
-    turns = driver.find_elements(By.CSS_SELECTOR, USER_TURN_SELECTOR)
+def _any_visible(driver, selectors):
+    for element in _find_all(driver, selectors):
+        try:
+            if element.is_displayed():
+                return True
+        except Exception:
+            continue
 
-    if not turns:
-        return None
-
-    return turns[-1]
+    return False
 
 
-def get_latest_chat_assistant_turn(driver):
-    """
-    Get the latest assistant turn in the current chat main area.
-    """
-    turns = driver.find_elements(By.CSS_SELECTOR, ASSISTANT_TURN_SELECTOR)
+def _visible_elements(driver, selector):
+    result = []
 
-    if not turns:
-        return None
+    try:
+        elements = driver.find_elements(By.CSS_SELECTOR, selector)
+    except Exception:
+        return result
 
-    return turns[-1]
+    for element in elements:
+        try:
+            if element.is_displayed():
+                result.append(element)
+        except Exception:
+            continue
+
+    return result
 
 
 def get_chat_turn_cnts(driver):
-    """
-    Return useful turn counts at once.
+    try:
+        user_count = len(driver.find_elements(By.CSS_SELECTOR, USER_TURN_SELECTOR))
+    except Exception:
+        user_count = 0
 
-    Return:
-        {
-            "all": int,
-            "user": int,
-            "assistant": int
-        }
-    """
+    try:
+        assistant_count = len(driver.find_elements(By.CSS_SELECTOR, ASSISTANT_TURN_SELECTOR))
+    except Exception:
+        assistant_count = 0
+
     return {
-        "all": get_chat_all_turn_cnt(driver),
-        "user": get_chat_user_turn_cnt(driver),
-        "assistant": get_chat_assistant_turn_cnt(driver),
+        "user": user_count,
+        "assistant": assistant_count,
     }
 
 
-def get_chat_turn_cnt_snapshot(driver):
-    """
-    Take a count snapshot before sending a message.
+def get_latest_chat_turn(driver):
+    visible_turns = _visible_elements(driver, TURN_SELECTOR)
 
-    This is useful for checking:
-        - user count increased      => message sent
-        - assistant count increased => assistant started replying
-    """
-    return get_chat_turn_cnts(driver)
-
-
-def wait_user_msg_sent(driver, before_user_cnt, timeout=60):
-    """
-    Wait until user turn count increases.
-
-    This means the user's message has appeared in the conversation,
-    so the message was submitted successfully.
-    """
-    print("Waiting for user message to be sent...")
+    if visible_turns:
+        return visible_turns[-1]
 
     try:
-        WebDriverWait(driver, timeout).until(
-            lambda d: get_chat_user_turn_cnt(d) > before_user_cnt
+        turns = driver.find_elements(By.CSS_SELECTOR, TURN_SELECTOR)
+    except Exception:
+        return None
+
+    if turns:
+        return turns[-1]
+
+    return None
+
+
+def get_latest_chat_user_turn(driver):
+    visible_turns = _visible_elements(driver, USER_TURN_SELECTOR)
+
+    if visible_turns:
+        return visible_turns[-1]
+
+    try:
+        turns = driver.find_elements(By.CSS_SELECTOR, USER_TURN_SELECTOR)
+    except Exception:
+        return None
+
+    if turns:
+        return turns[-1]
+
+    return None
+
+
+def get_latest_chat_assistant_turn(driver):
+    visible_turns = _visible_elements(driver, ASSISTANT_TURN_SELECTOR)
+
+    if visible_turns:
+        return visible_turns[-1]
+
+    try:
+        turns = driver.find_elements(By.CSS_SELECTOR, ASSISTANT_TURN_SELECTOR)
+    except Exception:
+        return None
+
+    if turns:
+        return turns[-1]
+
+    return None
+
+
+def wait_user_turn_from_snapshot(driver, snapshot, timeout=60):
+    logger.info("Wait user message turn appear...")
+
+    wait = WebDriverWait(driver, timeout)
+
+    def _user_turn_added(d):
+        current = get_chat_turn_cnts(d)
+        return current["user"] > snapshot["user"]
+
+    try:
+        wait.until(_user_turn_added)
+        current = get_chat_turn_cnts(driver)
+        logger.info(
+            f"User message appeared. user={snapshot['user']} -> {current['user']}"
         )
-        print("User message sent")
         return True
+
     except TimeoutException:
-        print("Warning: timeout while waiting for user message to be sent")
-        return False
-
-
-def wait_assistant_response_started(driver, before_assistant_cnt, timeout=180):
-    """
-    Wait until assistant turn count increases.
-
-    This means ChatGPT has started creating a new reply.
-    """
-    print("Waiting for assistant response to start...")
-
-    try:
-        WebDriverWait(driver, timeout).until(
-            lambda d: get_chat_assistant_turn_cnt(d) > before_assistant_cnt
+        logger.warning(
+            f"Timeout while waiting user message. user snapshot={snapshot['user']}"
         )
-        print("Assistant response started")
-        return True
-    except TimeoutException:
-        print("Warning: timeout while waiting for assistant response to start")
         return False
 
 
-def wait_msg_flow_started(
-    driver,
-    before_user_cnt,
-    before_assistant_cnt,
-    user_timeout=60,
-    assistant_timeout=180,
-):
-    """
-    Wait for the normal message flow:
+def wait_assistant_turn_from_snapshot(driver, snapshot, timeout=180):
+    logger.info("Wait assistant message turn appear...")
 
-        1. user turn count increases
-        2. assistant turn count increases
+    wait = WebDriverWait(driver, timeout)
 
-    Return:
-        True  if both steps succeed
-        False if one of the steps times out
-    """
-    user_sent = wait_user_msg_sent(
-        driver,
-        before_user_cnt=before_user_cnt,
-        timeout=user_timeout,
-    )
-
-    if not user_sent:
-        return False
-
-    return wait_assistant_response_started(
-        driver,
-        before_assistant_cnt=before_assistant_cnt,
-        timeout=assistant_timeout,
-    )
-
-
-def wait_msg_flow_started_from_snapshot(
-    driver,
-    snapshot,
-    user_timeout=60,
-    assistant_timeout=180,
-):
-    """
-    Same as wait_msg_flow_started(), but uses a snapshot dict.
-
-    Example:
-        snapshot = get_chat_turn_cnt_snapshot(driver)
-        send_prompt_and_image(...)
-        wait_msg_flow_started_from_snapshot(driver, snapshot)
-    """
-    return wait_msg_flow_started(
-        driver,
-        before_user_cnt=snapshot["user"],
-        before_assistant_cnt=snapshot["assistant"],
-        user_timeout=user_timeout,
-        assistant_timeout=assistant_timeout,
-    )
-
-
-def wait_new_assistant_msg(driver, before_assistant_cnt, timeout=180):
-    """
-    Wait until assistant turn count increases.
-    """
-    return wait_assistant_response_started(
-        driver,
-        before_assistant_cnt=before_assistant_cnt,
-        timeout=timeout,
-    )
-
-
-def wait_response_complete(driver, timeout=240, stable_seconds=10):
-    """Wait until ChatGPT finishes generating (stop button disappears)."""
-    print("Waiting for response...")
-
-    stop_selectors = [
-        '[data-testid="stop-button"]',
-        'button[data-testid="stop-button"]',
-        'button[aria-label*="Stop" i]',
-        'button[aria-label*="停止" i]',
-    ]
-
-    last_html = ""
-    last_change_time = time.time()
+    def _assistant_turn_added(d):
+        current = get_chat_turn_cnts(d)
+        return current["assistant"] > snapshot["assistant"]
 
     try:
-        wait = WebDriverWait(driver, timeout)
+        wait.until(_assistant_turn_added)
+        current = get_chat_turn_cnts(driver)
+        logger.info(
+            f"Assistant message appeared. assistant={snapshot['assistant']} -> {current['assistant']}"
+        )
+        return True
 
-        def _response_done(d):
-            nonlocal last_html, last_change_time
+    except TimeoutException:
+        logger.warning(
+            f"Timeout while waiting assistant message. assistant snapshot={snapshot['assistant']}"
+        )
+        return False
 
-            stop_visible = False
 
-            for selector in stop_selectors:
-                try:
-                    elements = d.find_elements(By.CSS_SELECTOR, selector)
-                except Exception:
-                    continue
+def wait_response_complete(
+    driver,
+    timeout=240,
+    poll_frequency=1,
+    required_confirm_count=5
+):
+    logger.info("Wait Button [Stop] appear.")
 
-                for element in elements:
-                    try:
-                        if element.is_displayed():
-                            stop_visible = True
-                            break
-                    except Exception:
-                        continue
+    wait = WebDriverWait(
+        driver,
+        timeout,
+        poll_frequency=poll_frequency,
+    )
 
-                if stop_visible:
-                    break
+    def _begin_response(d):
+        return _any_visible(d, STOP_BUTTON_SELECTORS)
 
-            latest_turn = get_latest_chat_assistant_turn(d)
+    try:
+        wait.until(_begin_response)
+        logger.info("Button [Stop] appeared.")
 
-            if latest_turn is None:
-                return False
+    except TimeoutException:
+        logger.warning("Timeout while waiting Button [Stop] appear.")
+        return False
 
-            try:
-                current_html = latest_turn.get_attribute("innerHTML") or ""
-            except Exception:
-                return False
+    logger.info("Begin Wait Response.")
 
-            if current_html != last_html:
-                last_html = current_html
-                last_change_time = time.time()
-                return False
+    confirm_count = 0
 
-            if stop_visible:
-                return False
+    def _response_done(d):
+        nonlocal confirm_count
 
-            return time.time() - last_change_time >= stable_seconds
+        stop_visible = _any_visible(d, STOP_BUTTON_SELECTORS)
+        speech_visible = _any_visible(d, SPEECH_BUTTON_SELECTORS)
 
+        if not stop_visible and speech_visible:
+            confirm_count += 1
+        else:
+            confirm_count = 0
+
+        logger.info(
+            f"Response complete confirm: {confirm_count} / {required_confirm_count}, "
+            f"stop_visible={stop_visible}, speech_visible={speech_visible}"
+        )
+
+        return confirm_count >= required_confirm_count
+
+    try:
         wait.until(_response_done)
-
-        print("Response complete")
-        time.sleep(1)
+        logger.info("Response complete")
         return True
 
     except TimeoutException:
-        print("Warning: timeout while waiting for response")
+        logger.warning("Timeout while waiting response complete.")
+        return False
+
+
+def wait_response_turn_still_present(driver, timeout=30):
+    logger.info("Wait latest assistant turn present...")
+
+    wait = WebDriverWait(driver, timeout)
+
+    def _has_assistant_turn(d):
+        turn = get_latest_chat_assistant_turn(d)
+        return turn if turn is not None else False
+
+    try:
+        wait.until(_has_assistant_turn)
+        logger.info("Latest assistant turn found")
+        return True
+
+    except TimeoutException:
+        logger.warning("Timeout while waiting latest assistant turn")
         return False
 
 
@@ -268,45 +265,44 @@ def wait_full_response_flow_from_snapshot(
     user_timeout=60,
     assistant_timeout=180,
     complete_timeout=240,
-    stable_seconds=10,
+    poll_frequency=1,
+    assistant_turn_timeout=30,
+    required_confirm_count=5
 ):
-    """
-    Full message flow:
-
-        1. Wait for user message sent
-        2. Wait for assistant response started
-        3. Wait for assistant response complete
-
-    Return:
-        True  if all steps succeed
-        False if any step times out
-    """
-    started = wait_msg_flow_started_from_snapshot(
+    user_ok = wait_user_turn_from_snapshot(
         driver,
         snapshot=snapshot,
-        user_timeout=user_timeout,
-        assistant_timeout=assistant_timeout,
+        timeout=user_timeout,
     )
 
-    if not started:
+    if not user_ok:
         return False
 
-    return wait_response_complete(
+    assistant_ok = wait_assistant_turn_from_snapshot(
+        driver,
+        snapshot=snapshot,
+        timeout=assistant_timeout,
+    )
+
+    if not assistant_ok:
+        return False
+
+    complete_ok = wait_response_complete(
         driver,
         timeout=complete_timeout,
-        stable_seconds=stable_seconds,
+        poll_frequency=poll_frequency,
+        required_confirm_count=required_confirm_count,
     )
 
+    if not complete_ok:
+        return False
 
-def print_chat_turn_debug(driver):
-    """
-    Debug helper.
-    """
-    counts = get_chat_turn_cnts(driver)
-
-    print(
-        "Current chat turns: "
-        f"all={counts['all']}, "
-        f"user={counts['user']}, "
-        f"assistant={counts['assistant']}"
+    assistant_turn_ok = wait_response_turn_still_present(
+        driver,
+        timeout=assistant_turn_timeout,
     )
+
+    if not assistant_turn_ok:
+        return False
+
+    return True

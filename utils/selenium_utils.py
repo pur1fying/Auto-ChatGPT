@@ -2,6 +2,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support.ui import WebDriverWait
 
+from utils.logger import logger
+
 
 def is_visible(driver, selector: str) -> bool:
     try:
@@ -57,10 +59,6 @@ def wait_first_present(driver, selectors, timeout=20):
         return False
 
     return wait.until(_find_present)
-
-
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
 
 
 def wait_clickable(driver, selectors, timeout=20):
@@ -123,7 +121,16 @@ def click_menu_item_by_text(driver, texts, timeout=10):
 import undetected_chromedriver as uc
 
 
-def create_driver(profile_dir, version_main: int = 147):
+def create_driver(
+        profile_dir,
+        version_main: int = 147,
+        driver_exe_path = None
+):
+    logger.info("<<< Create Driver >>>")
+    logger.info(f"Profile Dir: {profile_dir}")
+    logger.info(f"Chrome Ver : {version_main}")
+    logger.info(f"Driver exe : {driver_exe_path}")
+
     options = uc.ChromeOptions()
 
     options.add_argument(f"--user-data-dir={profile_dir}")
@@ -134,7 +141,7 @@ def create_driver(profile_dir, version_main: int = 147):
     driver = uc.Chrome(
         version_main=version_main,
         options=options,
-        driver_executable_path="C:\\Users\\Administrator\\AppData\\Roaming\\undetected_chromedriver\\undetected_chromedriver.exe"
+        driver_executable_path=driver_exe_path
     )
 
     return driver

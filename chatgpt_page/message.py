@@ -1,70 +1,74 @@
+import time
 from pathlib import Path
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException
 
+from utils.Exception import AutoChatGPTInternalError
 from utils.selenium_utils import wait_clickable, wait_first_present, get_element_text
-from .common import get_composer_root, get_prompt_input_selectors
+from utils.logger import logger
+from chatgpt_page.common import get_composer_root, get_prompt_input_selectors
+from chatgpt_page.response import get_chat_turn_cnts
 
 
-def get_prompt_input(driver, timeout=30):
+def get_prompt_input(driver, timeout=3):
     return wait_clickable(
         driver,
         get_prompt_input_selectors(),
         timeout=timeout
     )[0]
 
+
 def preprocess_prompt(prompt: str) -> str:
     """
-        Replace all line breaks with spaces before send_keys.
-        This avoids multi-line prompts being treated as Enter/submit by the page.
+    Replace all line breaks with spaces before send_keys.
+    Avoid multi-line prompts submitted unexpectedly.
     """
-    _old = str(prompt)
-
-    newline_count = (
-        _old.count("\r\n")
-        + _old.count("\n")
-        + _old.count("\r")
-    )
-
-    _new = (
-        _old
+    new_prompt = (
+        str(prompt)
         .replace("\r\n", " ")
         .replace("\n", " ")
         .replace("\r", " ")
     )
 
-    # Optional: collapse repeated spaces caused by blank lines.
-    _new = " ".join(_new.split())
+    return " ".join(new_prompt.split())
 
-    if newline_count > 0:
-        print(
-            f"Prompt normalize: replaced {newline_count} newline(s) with spaces "
-            f"before send_keys. length {len(_old)} -> {len(_new)}"
-        )
-    else:
-        print("Prompt normalize: no newline found before send_keys")
-
-    return _new
 
 def set_prompt_text(_input, prompt, check=True):
+    logger.info("<<< Set prompt text >>>")
     prompt = preprocess_prompt(prompt)
+
+    logger.info(f"Text length : {len(prompt)}")
+
     _input.click()
     _input.clear()
     _input.send_keys(prompt)
+
     if check:
+        logger.info("Verify Input Text.")
         text = get_element_text(_input)
         if text != prompt:
-            raise ValueError(f"Input Text Verification Failed: expected prompt text does not match actual text. In : {prompt} \n Out: {text}")
+            logger.error(
+                f"Input text verification failed. "
+                f"Expected length={len(prompt)}, actual length={len(text)}"
+            )
+            raise AutoChatGPTInternalError(
+                "Input Text Verification Failed: expected prompt text does not match actual text. "
+                f"In: {prompt}\nOut: {text}"
+            )
+
     return True
 
+
 def get_send_button(driver, timeout=30):
-    return wait_clickable(
+    button = wait_clickable(
         driver,
         ['#composer-submit-button'],
         timeout=timeout
     )[0]
+    return button
+
 
 def get_uploaded_image_count(driver):
     composer = get_composer_root(driver)
@@ -77,23 +81,31 @@ def get_uploaded_image_count(driver):
         'button[aria-label*="open image" i] img, '
         'img'
     )
+
     for img in imgs:
         try:
             src = img.get_attribute("src") or ""
             if "backend-api/estuary/content" in src and "id=file_" in src:
                 count += 1
-        except Exception:
+        except:
             continue
 
     return count
 
-def wait_for_file_uploaded(driver, timeout=180):
-    _before_cnt = get_uploaded_image_count(driver)
+
+def wait_for_file_uploaded(driver, timeout=600):
+    before_cnt = get_uploaded_image_count(driver)
+
+    logger.info(f"Before Image Cnt : {before_cnt}")
+
     wait = WebDriverWait(driver, timeout)
+
     def _uploaded(d):
         composer = get_composer_root(d)
+
         if composer is None:
             return False
+
         imgs = composer.find_elements(
             By.CSS_SELECTOR,
             'button[aria-label*="打开图片"] img, '
@@ -101,7 +113,7 @@ def wait_for_file_uploaded(driver, timeout=180):
             'img'
         )
         has_blob_preview = False
-        _now_cnt = 0
+        now_count = 0
         for img in imgs:
             try:
                 if not img.is_displayed():
@@ -111,26 +123,31 @@ def wait_for_file_uploaded(driver, timeout=180):
                     has_blob_preview = True
                     continue
                 if "backend-api/estuary/content" in src and "id=file_" in src:
-                    _now_cnt += 1
+                    now_count += 1
             except Exception:
                 continue
-        if _now_cnt > _before_cnt and not has_blob_preview:
+        if now_count > before_cnt and not has_blob_preview:
             return True
         return False
     try:
         wait.until(_uploaded)
-        print("Image upload complete")
+        after_cnt = get_uploaded_image_count(driver)
+        logger.info(f"After Image Cnt  : {after_cnt}")
+        return True
+
     except TimeoutException:
-        print("Warning: timeout while waiting for image upload complete")
+        return False
 
 
 def get_current_attachment_count(driver):
     composer = get_composer_root(driver)
 
     if composer is None:
+        logger.debug("Composer root not found while counting attachments")
         return 0
 
     count = len(composer.find_elements(By.CSS_SELECTOR, 'img'))
+
     count += len(
         composer.find_elements(
             By.CSS_SELECTOR,
@@ -141,19 +158,21 @@ def get_current_attachment_count(driver):
         )
     )
 
+    logger.debug(f"Current attachment count: {count}")
     return count
 
 
-def upload_image_needed(driver, image_path):
+def upload_image(driver, image_path):
     if not image_path:
-        return
+        return False
 
     image_path = Path(image_path)
 
     if not image_path.exists():
-        print(f"Warning: image not found: {image_path}")
-        return
+        return False
 
+    logger.info("<<< Set File Image >>>")
+    logger.info(f"Image : {image_path.name}")
     file_input = wait_first_present(
         driver,
         [
@@ -165,19 +184,74 @@ def upload_image_needed(driver, image_path):
     )
 
     file_input.send_keys(str(image_path.resolve()))
-    wait_for_file_uploaded(driver)
+    ret =  wait_for_file_uploaded(driver)
+
+    if ret:
+        logger.info(f"Image uploaded successfully: {image_path.name}")
+    else:
+        logger.warning(f"Failed to upload Image")
+    return ret
 
 
-def send_prompt_and_image(driver, prompt, image_path=None):
-    """Type the prompt and optionally upload an image, then send."""
-    # Locate the input box
+def set_prompt_and_image(driver, prompt, image_path=None):
+    """
+    Set prompt and optionally upload an image
+    """
+    logger.info("<<< Send Prompt And Image >>>")
+
+    logger.info("Preparing composer input")
     _input = get_prompt_input(driver, timeout=30)
 
-    # Upload image if path is valid
-    upload_image_needed(driver, image_path)
+    if image_path:
+        upload_image(driver, image_path)
+    else:
+        logger.info("No image attached for this prompt")
 
-    # Enter prompt text
     set_prompt_text(_input, prompt)
+    return True
 
-    send_btn = get_send_button(driver, timeout=30)
-    send_btn.click()
+
+def send_message(
+    driver,
+    snapshot,
+    timeout=60,
+    retry_interval=5,
+):
+    logger.info("<<< Send Message >>>")
+
+    def _user_turn_added(d):
+        current = get_chat_turn_cnts(d)
+        return current["user"] > snapshot["user"]
+
+    end_time = time.time() + timeout
+    click_count = 0
+
+    while time.time() < end_time:
+        click_count += 1
+
+        try:
+            send_btn = get_send_button(driver, timeout=10)
+            send_btn.click()
+            logger.info(f"Clicked send button, attempt={click_count}")
+        except Exception as e:
+            logger.warning(f"Failed to click send button, attempt={click_count}, error={e}")
+
+        remaining = max(1, int(end_time - time.time()))
+        wait_timeout = min(retry_interval, remaining)
+
+        try:
+            WebDriverWait(driver, wait_timeout).until(_user_turn_added)
+
+            current = get_chat_turn_cnts(driver)
+            logger.info(
+                f"User message appeared. user={snapshot['user']} -> {current['user']}"
+            )
+            return True
+
+        except TimeoutException:
+            logger.warning(
+                f"User message not detected after click, retrying... attempt={click_count}"
+            )
+
+    logger.warning(f"Timeout while waiting user message after sending, timeout={timeout}s")
+    return False

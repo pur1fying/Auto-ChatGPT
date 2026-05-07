@@ -1,5 +1,7 @@
 import base64
+import hashlib
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 from selenium.webdriver.common.by import By
 
@@ -7,20 +9,41 @@ from chatgpt_page.response import get_latest_chat_assistant_turn
 from utils.path_utils import safe_filename
 
 
+def get_img_src_key(src: str) -> str:
+    """
+    Build a stable key for image deduplication.
+    """
+    if not src:
+        return ""
+
+    if "backend-api/estuary/content" in src:
+        try:
+            parsed = urlparse(src)
+            query = parse_qs(parsed.query)
+            file_id = query.get("id", [""])[0]
+            if file_id:
+                return f"estuary:{file_id}"
+        except Exception:
+            pass
+
+    if src.startswith("blob:"):
+        return src
+
+    if src.startswith("data:image"):
+        return hashlib.sha256(src.encode("utf-8", errors="ignore")).hexdigest()
+
+    return src.split("?")[0]
+
+
 def read_image_by_browser(driver, img):
     """
     Read image bytes inside browser context.
 
-    This works for:
+    Works for:
         - blob:
         - data:image
         - https://chatgpt.com/backend-api/estuary/content?id=file_...
     """
-    src = img.get_attribute("src") or ""
-
-    if not src:
-        return None, None
-
     result = driver.execute_async_script(
         """
         const img = arguments[0];
@@ -59,13 +82,8 @@ def read_image_by_browser(driver, img):
                 const blob = await response.blob();
                 const reader = new FileReader();
 
-                reader.onloadend = () => {
-                    callback(reader.result);
-                };
-
-                reader.onerror = () => {
-                    callback(null);
-                };
+                reader.onloadend = () => callback(reader.result);
+                reader.onerror = () => callback(null);
 
                 reader.readAsDataURL(blob);
             } catch (err) {
@@ -112,6 +130,50 @@ def read_image_by_browser(driver, img):
     return img_data, ext
 
 
+def collect_candidate_images(last_turn):
+    """
+    Collect generated images from latest assistant turn and dedupe by src/file_id first.
+    """
+    images = []
+    seen_src_keys = set()
+
+    for img in last_turn.find_elements(By.CSS_SELECTOR, "img"):
+        try:
+            src = img.get_attribute("src") or ""
+
+            if not src:
+                continue
+
+            width = int(float(img.get_attribute("naturalWidth") or img.get_attribute("width") or 0))
+            height = int(float(img.get_attribute("naturalHeight") or img.get_attribute("height") or 0))
+
+            # Skip avatars/icons/small UI images
+            if width < 128 or height < 128:
+                continue
+
+            if not (
+                src.startswith("data:image")
+                or src.startswith("blob:")
+                or src.startswith("http")
+                or "backend-api/estuary/content" in src
+            ):
+                continue
+
+            src_key = get_img_src_key(src)
+
+            if src_key in seen_src_keys:
+                print(f"Skip duplicated image src: {src_key}")
+                continue
+
+            seen_src_keys.add(src_key)
+            images.append(img)
+
+        except Exception:
+            continue
+
+    return images
+
+
 def save_generated_images(driver, save_dir, task_index, base_name=None):
     """Download images from the latest assistant message."""
     try:
@@ -124,28 +186,7 @@ def save_generated_images(driver, save_dir, task_index, base_name=None):
             print("No assistant turns found")
             return
 
-        images = []
-
-        for img in last_turn.find_elements(By.CSS_SELECTOR, "img"):
-            try:
-                src = img.get_attribute("src") or ""
-
-                width = int(float(img.get_attribute("naturalWidth") or img.get_attribute("width") or 0))
-                height = int(float(img.get_attribute("naturalHeight") or img.get_attribute("height") or 0))
-
-                if width < 128 or height < 128:
-                    continue
-
-                if (
-                    src.startswith("data:image")
-                    or src.startswith("blob:")
-                    or "backend-api/estuary/content" in src
-                    or src.startswith("http")
-                ):
-                    images.append(img)
-
-            except Exception:
-                continue
+        images = collect_candidate_images(last_turn)
 
         if not images:
             print("No generated images found in latest assistant turn")
@@ -157,6 +198,7 @@ def save_generated_images(driver, save_dir, task_index, base_name=None):
             base_name = safe_filename(base_name)
 
         saved_count = 0
+        seen_hashes = set()
 
         for img in images:
             img_data, ext = read_image_by_browser(driver, img)
@@ -164,6 +206,14 @@ def save_generated_images(driver, save_dir, task_index, base_name=None):
             if img_data is None:
                 print("Failed to read image from browser context")
                 continue
+
+            img_hash = hashlib.sha256(img_data).hexdigest()
+
+            if img_hash in seen_hashes:
+                print("Skip duplicated image content")
+                continue
+
+            seen_hashes.add(img_hash)
 
             filename = f"{base_name}_{saved_count}.{ext}"
             path = save_dir / filename
