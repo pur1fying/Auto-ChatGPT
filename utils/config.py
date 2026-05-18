@@ -32,6 +32,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "result_json_path": None,
         "image_location": "source",
     },
+    "task": {
+        "skip_policy_failed": True,
+    },
     "human_like_interaction": {
         "enabled": True,
         "before_new_chat_ms": [1500, 4000],

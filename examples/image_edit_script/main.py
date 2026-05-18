@@ -8,6 +8,7 @@ from chatgpt_page.response import (
     wait_full_response_flow_from_snapshot,
     get_chat_turn_cnts,
 )
+from chatgpt_page.dialogs import RequestTooFrequentError
 from chatgpt_page.sidebar.rename import rename_current_chat
 from utils.config import config, optional_path
 from utils.human_delay import HumanDelay
@@ -56,6 +57,22 @@ def rename_task_chat(driver, relative_path: Path, delay: HumanDelay | None = Non
         delay.sleep("after_rename", "after chat rename")
 
 
+def mark_rate_limited_and_stop(driver, result: ImageEditResult, image_path: Path, relative_path: Path) -> ProcessResult:
+    rate_limit_info = detect_request_too_frequent(get_page_text(driver)) or {
+        "raw_message": "Request too frequent dialog detected.",
+        "detected_at": ImageEditResult.now_iso(),
+    }
+    logger.warning("Request too frequent dialog detected. Stop batch.")
+    logger.warning(f"Message: {rate_limit_info.get('raw_message')}")
+
+    result.mark_rate_limited(
+        image_path=image_path,
+        relative_path=relative_path,
+        rate_limit_info=rate_limit_info,
+    )
+    return "stop"
+
+
 def process_single_image(
     driver,
     task: Dict[str, Any],
@@ -66,6 +83,7 @@ def process_single_image(
     image_root_dir: str,
     save_dir: Path,
     delay: HumanDelay | None = None,
+    skip_policy_failed: bool = True,
 ) -> ProcessResult:
     logger.info(f"Task : {idx + 1}/{total}")
 
@@ -83,9 +101,13 @@ def process_single_image(
     )
     task_output_dir.mkdir(parents=True, exist_ok=True)
 
-    if result.is_already_processed(image_path):
+    if result.is_already_processed(image_path, include_policy_failed=skip_policy_failed):
         record = result.get_task_record(image_path)
-        logger.info(f"Skip task : already processed, status={record.get('status')}")
+        status = record.get("status")
+        if status == "policy_failed":
+            logger.info("Skip task : previous result was policy_failed")
+        else:
+            logger.info(f"Skip task : already processed, status={status}")
         if output_location == "source":
             result.sync_output_png_to_source_dir(
                 image_path,
@@ -143,17 +165,8 @@ def process_single_image(
         message = f"{type(e).__name__}: {e}"
         logger.warning(f"Task setup/send failed: {message}")
 
-        rate_limit_info = detect_request_too_frequent(get_page_text(driver))
-        if rate_limit_info:
-            logger.warning("Request too frequent dialog detected. Stop batch.")
-            logger.warning(f"Message: {rate_limit_info.get('raw_message')}")
-
-            result.mark_rate_limited(
-                image_path=image_path,
-                relative_path=relative_path,
-                rate_limit_info=rate_limit_info,
-            )
-            return "stop"
+        if isinstance(e, RequestTooFrequentError) or detect_request_too_frequent(get_page_text(driver)):
+            return mark_rate_limited_and_stop(driver, result, image_path, relative_path)
 
         result.mark_unknown_failed(
             image_path=image_path,
@@ -170,21 +183,16 @@ def process_single_image(
 
     if delay is not None:
         delay.sleep("before_wait_response", "wait response")
-    flow_ok = wait_full_response_flow_from_snapshot(driver, snapshot=snapshot)
+    try:
+        flow_ok = wait_full_response_flow_from_snapshot(driver, snapshot=snapshot)
+    except RequestTooFrequentError:
+        return mark_rate_limited_and_stop(driver, result, image_path, relative_path)
 
     page_text = get_page_text(driver)
 
     rate_limit_info = detect_request_too_frequent(page_text)
     if rate_limit_info:
-        logger.warning("Request too frequent dialog detected. Stop batch.")
-        logger.warning(f"Message: {rate_limit_info.get('raw_message')}")
-
-        result.mark_rate_limited(
-            image_path=image_path,
-            relative_path=relative_path,
-            rate_limit_info=rate_limit_info,
-        )
-        return "stop"
+        return mark_rate_limited_and_stop(driver, result, image_path, relative_path)
 
     limit_info = detect_limit_reached(page_text)
     if limit_info:
@@ -273,6 +281,7 @@ if __name__ == "__main__":
     fixed_prompt = str(config.get("fixed_prompt"))
     output_image_location = str(config.get("output.image_location", "source")).strip().lower()
     output_location = get_output_location(output_image_location)
+    skip_policy_failed = bool(config.get("task.skip_policy_failed", True))
     delay = HumanDelay.from_config(config)
 
     result_manager = ImageEditResult(result_json_path)
@@ -305,6 +314,7 @@ if __name__ == "__main__":
                 image_root_dir=image_root_dir,
                 save_dir=save_dir,
                 delay=delay,
+                skip_policy_failed=skip_policy_failed,
             )
 
             if result == "stop":

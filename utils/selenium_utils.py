@@ -5,60 +5,82 @@ from selenium.webdriver.support.ui import WebDriverWait
 from utils.logger import logger
 
 
+def normalize_selectors(selectors):
+    if isinstance(selectors, str):
+        return [selectors]
+    return list(selectors)
+
+
+def find_all(search_context, selectors, by=By.CSS_SELECTOR):
+    elements = []
+
+    for selector in normalize_selectors(selectors):
+        try:
+            found = search_context.find_elements(by, selector)
+        except Exception:
+            continue
+
+        try:
+            elements.extend(found)
+        except TypeError:
+            continue
+
+    return elements
+
+
+def visible_elements(search_context, selectors, by=By.CSS_SELECTOR):
+    visible = []
+
+    for element in find_all(search_context, selectors, by=by):
+        try:
+            if element.is_displayed():
+                visible.append(element)
+        except Exception:
+            continue
+
+    return visible
+
+
+def any_visible(search_context, selectors, by=By.CSS_SELECTOR) -> bool:
+    return bool(visible_elements(search_context, selectors, by=by))
+
+
 def is_visible(driver, selector: str) -> bool:
-    try:
-        elements = driver.find_elements(By.CSS_SELECTOR, selector)
-
-        for element in elements:
-            try:
-                if element.is_displayed():
-                    return True
-            except Exception:
-                continue
-
-        return False
-    except Exception:
-        return False
+    return any_visible(driver, selector)
 
 
-def wait_first_visible(driver, selectors, timeout=20):
+def wait_visible(driver, selectors, timeout=20, by=By.CSS_SELECTOR):
     wait = WebDriverWait(driver, timeout)
 
     def _find_visible(d):
-        for selector in selectors:
-            try:
-                elements = d.find_elements(By.CSS_SELECTOR, selector)
-            except Exception:
-                continue
-
-            for element in elements:
-                try:
-                    if element.is_displayed():
-                        return element
-                except Exception:
-                    continue
+        elements = visible_elements(d, selectors, by=by)
+        if elements:
+            return elements[0]
 
         return False
 
     return wait.until(_find_visible)
 
 
-def wait_first_present(driver, selectors, timeout=20):
+def wait_first_visible(driver, selectors, timeout=20):
+    return wait_visible(driver, selectors, timeout=timeout)
+
+
+def wait_present(driver, selectors, timeout=20, by=By.CSS_SELECTOR):
     wait = WebDriverWait(driver, timeout)
 
     def _find_present(d):
-        for selector in selectors:
-            try:
-                elements = d.find_elements(By.CSS_SELECTOR, selector)
-            except Exception:
-                continue
-
-            if elements:
-                return elements[-1]
+        elements = find_all(d, selectors, by=by)
+        if elements:
+            return elements[-1]
 
         return False
 
     return wait.until(_find_present)
+
+
+def wait_first_present(driver, selectors, timeout=20):
+    return wait_present(driver, selectors, timeout=timeout)
 
 
 def wait_clickable(driver, selectors, timeout=20):
@@ -68,19 +90,13 @@ def wait_clickable(driver, selectors, timeout=20):
     Returns:
         (element, selector_index)
     """
-    if isinstance(selectors, str):
-        selectors = [selectors]
+    selectors = normalize_selectors(selectors)
 
     wait = WebDriverWait(driver, timeout)
 
     def _find_clickable(d):
         for index, selector in enumerate(selectors):
-            try:
-                elements = d.find_elements(By.CSS_SELECTOR, selector)
-            except:
-                continue
-
-            for element in elements:
+            for element in find_all(d, selector):
                 try:
                     if element.is_displayed() and element.is_enabled():
                         return element, index
@@ -91,25 +107,52 @@ def wait_clickable(driver, selectors, timeout=20):
     return wait.until(_find_clickable)
 
 
-def click_menu_item_by_text(driver, texts, timeout=10):
+def safe_click(element, driver=None, scroll=True, js_fallback=True):
+    if driver is None:
+        driver = getattr(element, "_parent", None)
+
+    if scroll and driver is not None:
+        try:
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});",
+                element,
+            )
+        except Exception:
+            pass
+
+    try:
+        element.click()
+        return True
+    except Exception:
+        if not js_fallback or driver is None:
+            raise
+
+    driver.execute_script("arguments[0].click();", element)
+    return True
+
+
+def click_by_text(
+    driver,
+    texts,
+    *,
+    selectors='[role="menuitem"], [cmdk-item], button, div[role="option"]',
+    timeout=10,
+    by=By.CSS_SELECTOR,
+):
+    texts = [text.lower() for text in normalize_selectors(texts)]
     wait = WebDriverWait(driver, timeout)
 
     def _click_item(d):
-        menu_items = d.find_elements(
-            By.CSS_SELECTOR,
-            '[role="menuitem"], [cmdk-item], button, div[role="option"]'
-        )
-
-        for item in menu_items:
+        for item in find_all(d, selectors, by=by):
             try:
                 text = item.text.strip()
                 aria = item.get_attribute("aria-label") or ""
                 combined = f"{text} {aria}"
 
                 for target in texts:
-                    if target.lower() in combined.lower():
+                    if target in combined.lower():
                         if item.is_displayed() and item.is_enabled():
-                            item.click()
+                            safe_click(item, driver=d)
                             return True
             except Exception:
                 continue
@@ -117,6 +160,11 @@ def click_menu_item_by_text(driver, texts, timeout=10):
         return False
 
     return wait.until(_click_item)
+
+
+def click_menu_item_by_text(driver, texts, timeout=10):
+    return click_by_text(driver, texts, timeout=timeout)
+
 
 import setuptools  # noqa: F401 - provides distutils compatibility for undetected_chromedriver on Python 3.12+
 import undetected_chromedriver as uc

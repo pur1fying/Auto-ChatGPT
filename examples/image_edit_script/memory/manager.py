@@ -24,7 +24,6 @@ class ImageEditResult:
 
     PROCESSED_STATUSES = {
         ProcessStatus.SUCCESS,
-        ProcessStatus.POLICY_FAILED,
     }
 
     def __init__(self, result_json_path: Path):
@@ -118,13 +117,17 @@ class ImageEditResult:
         except ValueError:
             return None
 
-    def is_already_processed(self, image_path: Path) -> bool:
+    def is_already_processed(self, image_path: Path, *, include_policy_failed: bool = True) -> bool:
         record = self.get_task_record(image_path)
         if not record:
             return False
 
         status = self.status_from_value(record.get("status"))
-        return status in self.PROCESSED_STATUSES
+        processed_statuses = set(self.PROCESSED_STATUSES)
+        if include_policy_failed:
+            processed_statuses.add(ProcessStatus.POLICY_FAILED)
+
+        return status in processed_statuses
 
     def count_output_images(
         self,

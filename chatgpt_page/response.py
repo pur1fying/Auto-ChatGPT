@@ -3,6 +3,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException
 
 from utils.logger import logger
+from utils.selenium_utils import any_visible, find_all, visible_elements
+from chatgpt_page.dialogs import raise_if_request_too_frequent
 
 
 TURN_SELECTOR = 'section[data-testid^="conversation-turn-"]'
@@ -11,70 +13,26 @@ ASSISTANT_TURN_SELECTOR = 'section[data-testid^="conversation-turn-"][data-turn=
 
 STOP_BUTTON_SELECTORS = [
     '#composer-submit-button[data-testid="stop-button"]',
-    '#composer-submit-button[aria-label*="停止"]',
+    '#composer-submit-button[aria-label*="\u505c\u6b62"]',
     '#composer-submit-button[aria-label*="Stop" i]',
 ]
 
 SPEECH_BUTTON_SELECTORS = [
-    'button[aria-label="启动语音功能"]',
-    'button[aria-label*="启动语音功能"]',
+    'button[aria-label="\u542f\u52a8\u8bed\u97f3\u529f\u80fd"]',
+    'button[aria-label*="\u542f\u52a8\u8bed\u97f3\u529f\u80fd"]',
     'button[aria-label*="voice" i]',
     'button[aria-label*="speech" i]',
 ]
 
 
-def _find_all(driver, selectors):
-    elements = []
-
-    if isinstance(selectors, str):
-        selectors = [selectors]
-
-    for selector in selectors:
-        try:
-            elements.extend(driver.find_elements(By.CSS_SELECTOR, selector))
-        except Exception:
-            continue
-
-    return elements
-
-
-def _any_visible(driver, selectors):
-    for element in _find_all(driver, selectors):
-        try:
-            if element.is_displayed():
-                return True
-        except Exception:
-            continue
-
-    return False
-
-
-def _visible_elements(driver, selector):
-    result = []
-
-    try:
-        elements = driver.find_elements(By.CSS_SELECTOR, selector)
-    except Exception:
-        return result
-
-    for element in elements:
-        try:
-            if element.is_displayed():
-                result.append(element)
-        except Exception:
-            continue
-
-    return result
-
-
 def get_chat_turn_cnts(driver):
     try:
-        user_count = len(driver.find_elements(By.CSS_SELECTOR, USER_TURN_SELECTOR))
+        user_count = len(find_all(driver, USER_TURN_SELECTOR))
     except Exception:
         user_count = 0
 
     try:
-        assistant_count = len(driver.find_elements(By.CSS_SELECTOR, ASSISTANT_TURN_SELECTOR))
+        assistant_count = len(find_all(driver, ASSISTANT_TURN_SELECTOR))
     except Exception:
         assistant_count = 0
 
@@ -85,16 +43,12 @@ def get_chat_turn_cnts(driver):
 
 
 def get_latest_chat_turn(driver):
-    visible_turns = _visible_elements(driver, TURN_SELECTOR)
+    visible_turns = visible_elements(driver, TURN_SELECTOR)
 
     if visible_turns:
         return visible_turns[-1]
 
-    try:
-        turns = driver.find_elements(By.CSS_SELECTOR, TURN_SELECTOR)
-    except Exception:
-        return None
-
+    turns = find_all(driver, TURN_SELECTOR)
     if turns:
         return turns[-1]
 
@@ -102,16 +56,12 @@ def get_latest_chat_turn(driver):
 
 
 def get_latest_chat_user_turn(driver):
-    visible_turns = _visible_elements(driver, USER_TURN_SELECTOR)
+    visible_turns = visible_elements(driver, USER_TURN_SELECTOR)
 
     if visible_turns:
         return visible_turns[-1]
 
-    try:
-        turns = driver.find_elements(By.CSS_SELECTOR, USER_TURN_SELECTOR)
-    except Exception:
-        return None
-
+    turns = find_all(driver, USER_TURN_SELECTOR)
     if turns:
         return turns[-1]
 
@@ -119,16 +69,12 @@ def get_latest_chat_user_turn(driver):
 
 
 def get_latest_chat_assistant_turn(driver):
-    visible_turns = _visible_elements(driver, ASSISTANT_TURN_SELECTOR)
+    visible_turns = visible_elements(driver, ASSISTANT_TURN_SELECTOR)
 
     if visible_turns:
         return visible_turns[-1]
 
-    try:
-        turns = driver.find_elements(By.CSS_SELECTOR, ASSISTANT_TURN_SELECTOR)
-    except Exception:
-        return None
-
+    turns = find_all(driver, ASSISTANT_TURN_SELECTOR)
     if turns:
         return turns[-1]
 
@@ -141,6 +87,7 @@ def wait_user_turn_from_snapshot(driver, snapshot, timeout=60):
     wait = WebDriverWait(driver, timeout)
 
     def _user_turn_added(d):
+        raise_if_request_too_frequent(d)
         current = get_chat_turn_cnts(d)
         return current["user"] > snapshot["user"]
 
@@ -165,6 +112,7 @@ def wait_assistant_turn_from_snapshot(driver, snapshot, timeout=180):
     wait = WebDriverWait(driver, timeout)
 
     def _assistant_turn_added(d):
+        raise_if_request_too_frequent(d)
         current = get_chat_turn_cnts(d)
         return current["assistant"] > snapshot["assistant"]
 
@@ -187,7 +135,7 @@ def wait_response_complete(
     driver,
     timeout=240,
     poll_frequency=1,
-    required_confirm_count=5
+    required_confirm_count=5,
 ):
     logger.info("Wait Button [Stop] appear.")
 
@@ -198,7 +146,8 @@ def wait_response_complete(
     )
 
     def _begin_response(d):
-        return _any_visible(d, STOP_BUTTON_SELECTORS)
+        raise_if_request_too_frequent(d)
+        return any_visible(d, STOP_BUTTON_SELECTORS)
 
     try:
         wait.until(_begin_response)
@@ -215,8 +164,10 @@ def wait_response_complete(
     def _response_done(d):
         nonlocal confirm_count
 
-        stop_visible = _any_visible(d, STOP_BUTTON_SELECTORS)
-        speech_visible = _any_visible(d, SPEECH_BUTTON_SELECTORS)
+        raise_if_request_too_frequent(d)
+
+        stop_visible = any_visible(d, STOP_BUTTON_SELECTORS)
+        speech_visible = any_visible(d, SPEECH_BUTTON_SELECTORS)
 
         if not stop_visible and speech_visible:
             confirm_count += 1
@@ -246,6 +197,7 @@ def wait_response_turn_still_present(driver, timeout=30):
     wait = WebDriverWait(driver, timeout)
 
     def _has_assistant_turn(d):
+        raise_if_request_too_frequent(d)
         turn = get_latest_chat_assistant_turn(d)
         return turn if turn is not None else False
 
@@ -267,7 +219,7 @@ def wait_full_response_flow_from_snapshot(
     complete_timeout=240,
     poll_frequency=1,
     assistant_turn_timeout=30,
-    required_confirm_count=5
+    required_confirm_count=5,
 ):
     user_ok = wait_user_turn_from_snapshot(
         driver,

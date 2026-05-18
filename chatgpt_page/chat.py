@@ -1,8 +1,4 @@
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-
-from utils.selenium_utils import wait_clickable
+from utils.selenium_utils import safe_click, wait_clickable, wait_visible
 
 
 def create_new_chat(driver):
@@ -15,10 +11,8 @@ def create_new_chat(driver):
     is_active = btn.get_attribute("data-active") is not None
     if not is_active:
         print("Change to page create new chat.")
-        btn.click()
+        safe_click(btn, driver=driver, scroll=False)
         _selector_active = 'a[data-testid="create-new-chat-button"][data-active]'
-        WebDriverWait(driver, 20).until(
-            EC.visibility_of_element_located((By.CSS_SELECTOR, _selector_active))
-        )
+        wait_visible(driver, _selector_active, timeout=20)
     else:
         print("Already in page new chat.")
