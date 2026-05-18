@@ -174,8 +174,17 @@ def collect_candidate_images(last_turn):
     return images
 
 
+def build_output_filename(base_name: str, saved_count: int, ext: str) -> str:
+    if saved_count == 0:
+        return f"{base_name}.{ext}"
+
+    return f"{base_name}_{saved_count}.{ext}"
+
+
 def save_generated_images(driver, save_dir, task_index, base_name=None):
     """Download images from the latest assistant message."""
+    saved_paths = []
+
     try:
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -184,13 +193,13 @@ def save_generated_images(driver, save_dir, task_index, base_name=None):
 
         if last_turn is None:
             print("No assistant turns found")
-            return
+            return saved_paths
 
         images = collect_candidate_images(last_turn)
 
         if not images:
             print("No generated images found in latest assistant turn")
-            return
+            return saved_paths
 
         if base_name is None:
             base_name = f"chat_img_task{task_index}"
@@ -215,17 +224,26 @@ def save_generated_images(driver, save_dir, task_index, base_name=None):
 
             seen_hashes.add(img_hash)
 
-            filename = f"{base_name}_{saved_count}.{ext}"
+            filename = build_output_filename(base_name, saved_count, ext)
             path = save_dir / filename
+
+            while path.exists():
+                saved_count += 1
+                filename = build_output_filename(base_name, saved_count, ext)
+                path = save_dir / filename
 
             with open(path, "wb") as f:
                 f.write(img_data)
 
+            saved_paths.append(path.resolve())
             saved_count += 1
             print(f"Saved: {path}")
 
         if saved_count == 0:
             print("No image was saved from latest assistant turn")
 
+        return saved_paths
+
     except Exception as e:
         print(f"Error saving images: {e}")
+        return saved_paths

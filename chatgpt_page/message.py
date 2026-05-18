@@ -2,8 +2,14 @@ import time
 from pathlib import Path
 
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import (
+    ElementClickInterceptedException,
+    TimeoutException,
+    WebDriverException,
+)
 
 from utils.Exception import AutoChatGPTInternalError
 from utils.selenium_utils import wait_clickable, wait_first_present, get_element_text
@@ -12,12 +18,179 @@ from chatgpt_page.common import get_composer_root, get_prompt_input_selectors
 from chatgpt_page.response import get_chat_turn_cnts
 
 
+BLOCKING_DIALOG_SELECTORS = [
+    'div[data-state="open"].fixed.inset-0',
+    '[role="dialog"][data-state="open"]',
+    '[data-radix-dialog-content][data-state="open"]',
+]
+
+DIALOG_CLOSE_BUTTON_SELECTORS = [
+    '[role="dialog"][data-state="open"] button[aria-label*="Close" i]',
+    '[role="dialog"][data-state="open"] button[aria-label*="关闭" i]',
+    '[role="dialog"][data-state="open"] button[aria-label*="取消" i]',
+    '[role="dialog"][data-state="open"] button[aria-label*="Cancel" i]',
+    '[data-radix-dialog-content][data-state="open"] button[aria-label*="Close" i]',
+    '[data-radix-dialog-content][data-state="open"] button[aria-label*="关闭" i]',
+    '[data-radix-dialog-content][data-state="open"] button[aria-label*="取消" i]',
+    '[data-radix-dialog-content][data-state="open"] button[aria-label*="Cancel" i]',
+]
+
+DIALOG_CLOSE_BUTTON_TEXTS = {
+    "close",
+    "cancel",
+    "not now",
+    "got it",
+    "ok",
+    "关闭",
+    "取消",
+    "知道了",
+    "稍后",
+}
+
+REQUEST_TOO_FREQUENT_DIALOG_TEXTS = (
+    "请求过于频繁",
+    "你的请求过于频繁",
+    "暂时限制你访问对话记录",
+    "请稍等几分钟后再重试",
+    "too frequent",
+)
+
+
+def _sleep_delay(delay, step_name, reason=""):
+    if delay is not None:
+        delay.sleep(step_name, reason)
+
+
 def get_prompt_input(driver, timeout=3):
     return wait_clickable(
         driver,
         get_prompt_input_selectors(),
         timeout=timeout
     )[0]
+
+
+def _visible_elements(driver, selectors):
+    if isinstance(selectors, str):
+        selectors = [selectors]
+
+    visible = []
+    for selector in selectors:
+        try:
+            elements = driver.find_elements(By.CSS_SELECTOR, selector)
+        except Exception:
+            continue
+
+        for element in elements:
+            try:
+                if element.is_displayed():
+                    visible.append(element)
+            except Exception:
+                continue
+
+    return visible
+
+
+def get_visible_blocking_dialogs(driver):
+    return _visible_elements(driver, BLOCKING_DIALOG_SELECTORS)
+
+
+def has_blocking_dialog(driver):
+    return len(get_visible_blocking_dialogs(driver)) > 0
+
+
+def wait_blocking_dialog_closed(driver, timeout=2):
+    try:
+        WebDriverWait(driver, timeout, poll_frequency=0.2).until(
+            lambda d: not has_blocking_dialog(d)
+        )
+        return True
+    except TimeoutException:
+        return False
+
+
+def _send_escape(driver):
+    try:
+        ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+        return True
+    except WebDriverException:
+        try:
+            driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+            return True
+        except Exception:
+            return False
+
+
+def _click_dialog_close_button(driver):
+    for selector in DIALOG_CLOSE_BUTTON_SELECTORS:
+        for button in _visible_elements(driver, selector):
+            try:
+                if button.is_enabled():
+                    button.click()
+                    return True
+            except Exception:
+                try:
+                    driver.execute_script("arguments[0].click();", button)
+                    return True
+                except Exception:
+                    continue
+
+    for dialog in get_visible_blocking_dialogs(driver):
+        try:
+            buttons = dialog.find_elements(By.CSS_SELECTOR, "button")
+        except Exception:
+            continue
+
+        for button in buttons:
+            try:
+                label = (button.get_attribute("aria-label") or "").strip().lower()
+                text = (button.text or "").strip().lower()
+                if not button.is_displayed() or not button.is_enabled():
+                    continue
+                if label in DIALOG_CLOSE_BUTTON_TEXTS or text in DIALOG_CLOSE_BUTTON_TEXTS:
+                    button.click()
+                    return True
+            except Exception:
+                try:
+                    driver.execute_script("arguments[0].click();", button)
+                    return True
+                except Exception:
+                    continue
+
+    return False
+
+
+def is_request_too_frequent_dialog(dialog) -> bool:
+    try:
+        text = (dialog.text or "").strip().lower()
+    except Exception:
+        return False
+
+    return any(pattern in text for pattern in REQUEST_TOO_FREQUENT_DIALOG_TEXTS)
+
+
+def dismiss_blocking_dialog_if_present(driver, timeout=3):
+    dialogs = get_visible_blocking_dialogs(driver)
+    if not dialogs:
+        return False
+
+    if any(is_request_too_frequent_dialog(dialog) for dialog in dialogs):
+        raise AutoChatGPTInternalError(
+            "Request too frequent dialog is visible; stop batch instead of dismissing it."
+        )
+
+    logger.warning("Blocking ChatGPT dialog/overlay detected; attempting to dismiss it.")
+
+    if _send_escape(driver) and wait_blocking_dialog_closed(driver, timeout=timeout):
+        logger.info("Blocking dialog dismissed with Escape.")
+        return True
+
+    if _click_dialog_close_button(driver) and wait_blocking_dialog_closed(driver, timeout=timeout):
+        logger.info("Blocking dialog dismissed with close/cancel button.")
+        return True
+
+    raise AutoChatGPTInternalError(
+        "Blocking ChatGPT dialog/overlay is still visible and could not be dismissed."
+    )
 
 
 def preprocess_prompt(prompt: str) -> str:
@@ -35,15 +208,72 @@ def preprocess_prompt(prompt: str) -> str:
     return " ".join(new_prompt.split())
 
 
-def set_prompt_text(_input, prompt, check=True):
+def set_prompt_text(
+    _input,
+    prompt,
+    check=True,
+    driver=None,
+    input_getter=None,
+    max_attempts=3,
+    delay=None,
+):
     logger.info("<<< Set prompt text >>>")
     prompt = preprocess_prompt(prompt)
 
     logger.info(f"Text length : {len(prompt)}")
 
-    _input.click()
-    _input.clear()
-    _input.send_keys(prompt)
+    if driver is None:
+        driver = getattr(_input, "_parent", None)
+
+    last_error = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            if driver is not None:
+                dismiss_blocking_dialog_if_present(driver)
+
+            if input_getter is not None:
+                _input = input_getter()
+
+            try:
+                _input.click()
+            except ElementClickInterceptedException:
+                raise
+            except Exception:
+                if driver is None:
+                    raise
+                driver.execute_script("arguments[0].focus(); arguments[0].click();", _input)
+
+            _input.clear()
+            _input.send_keys(prompt)
+            break
+
+        except ElementClickInterceptedException as e:
+            last_error = e
+            logger.warning(
+                f"Prompt input click intercepted, attempt={attempt}/{max_attempts}."
+            )
+            if driver is None:
+                raise
+            dismiss_blocking_dialog_if_present(driver)
+            if attempt >= max_attempts:
+                raise AutoChatGPTInternalError(
+                    "Prompt input click was repeatedly intercepted by a page overlay."
+                ) from e
+            _sleep_delay(delay, "retry_backoff", f"set prompt text retry attempt={attempt}")
+        except Exception as e:
+            last_error = e
+            if attempt >= max_attempts:
+                raise
+            logger.warning(
+                f"Failed to set prompt text, attempt={attempt}/{max_attempts}, error={e}"
+            )
+            if delay is not None:
+                _sleep_delay(delay, "retry_backoff", f"set prompt text retry attempt={attempt}")
+            else:
+                time.sleep(0.5)
+    else:
+        raise AutoChatGPTInternalError("Failed to set prompt text.") from last_error
 
     if check:
         logger.info("Verify Input Text.")
@@ -193,21 +423,30 @@ def upload_image(driver, image_path):
     return ret
 
 
-def set_prompt_and_image(driver, prompt, image_path=None):
+def set_prompt_and_image(driver, prompt, image_path=None, delay=None):
     """
     Set prompt and optionally upload an image
     """
     logger.info("<<< Send Prompt And Image >>>")
 
     logger.info("Preparing composer input")
-    _input = get_prompt_input(driver, timeout=30)
+    get_prompt_input(driver, timeout=30)
 
     if image_path:
+        _sleep_delay(delay, "before_upload", "upload image")
         upload_image(driver, image_path)
+        _sleep_delay(delay, "after_upload", "wait after image upload")
     else:
         logger.info("No image attached for this prompt")
 
-    set_prompt_text(_input, prompt)
+    _sleep_delay(delay, "before_prompt_input", "set prompt text")
+    set_prompt_text(
+        get_prompt_input(driver, timeout=30),
+        prompt,
+        driver=driver,
+        input_getter=lambda: get_prompt_input(driver, timeout=30),
+        delay=delay,
+    )
     return True
 
 
@@ -216,6 +455,7 @@ def send_message(
     snapshot,
     timeout=60,
     retry_interval=5,
+    delay=None,
 ):
     logger.info("<<< Send Message >>>")
 
@@ -230,9 +470,11 @@ def send_message(
         click_count += 1
 
         try:
+            _sleep_delay(delay, "before_send", f"send message attempt={click_count}")
             send_btn = get_send_button(driver, timeout=10)
             send_btn.click()
             logger.info(f"Clicked send button, attempt={click_count}")
+            _sleep_delay(delay, "after_send", f"send message attempt={click_count}")
         except Exception as e:
             logger.warning(f"Failed to click send button, attempt={click_count}, error={e}")
 
@@ -252,6 +494,7 @@ def send_message(
             logger.warning(
                 f"User message not detected after click, retrying... attempt={click_count}"
             )
+            _sleep_delay(delay, "retry_backoff", f"send retry attempt={click_count}")
 
     logger.warning(f"Timeout while waiting user message after sending, timeout={timeout}s")
     return False

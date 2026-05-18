@@ -1,0 +1,4 @@
+rich>=13.9.4
+selenium>=4.43.0
+setuptools>=80.9.0
+undetected-chromedriver>=3.5.5

@@ -118,18 +118,21 @@ def click_menu_item_by_text(driver, texts, timeout=10):
 
     return wait.until(_click_item)
 
+import setuptools  # noqa: F401 - provides distutils compatibility for undetected_chromedriver on Python 3.12+
 import undetected_chromedriver as uc
 
 
 def create_driver(
         profile_dir,
         version_main: int = 147,
-        driver_exe_path = None
+        driver_exe_path = None,
+        script_timeout: int = 120,
 ):
     logger.info("<<< Create Driver >>>")
     logger.info(f"Profile Dir: {profile_dir}")
     logger.info(f"Chrome Ver : {version_main}")
     logger.info(f"Driver exe : {driver_exe_path}")
+    logger.info(f"Script Timeout: {script_timeout}s")
 
     options = uc.ChromeOptions()
 
@@ -143,6 +146,7 @@ def create_driver(
         options=options,
         driver_executable_path=driver_exe_path
     )
+    driver.set_script_timeout(script_timeout)
 
     return driver
 

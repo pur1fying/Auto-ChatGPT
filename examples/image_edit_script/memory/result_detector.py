@@ -1,5 +1,3 @@
-# examples/image_edit_script/result_memory/detector.py
-
 import re
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -50,7 +48,7 @@ def detect_limit_reached(page_text: str) -> Optional[Dict[str, Any]]:
     reset_after_text = None
 
     match = re.search(
-        r"limit resets in\s+([^.。\n\r]+)",
+        r"limit resets in\s+([^.\n\r]+)",
         text,
         flags=re.IGNORECASE,
     )
@@ -63,6 +61,28 @@ def detect_limit_reached(page_text: str) -> Optional[Dict[str, Any]]:
         "raw_message": extract_limit_message(text),
         "reset_after_text": reset_after_text,
         "reset_after_minutes": reset_after_minutes,
+        "detected_at": now_iso(),
+    }
+
+
+def detect_request_too_frequent(page_text: str) -> Optional[Dict[str, Any]]:
+    text = page_text
+    normalized = text.lower()
+
+    rate_limit_keywords = [
+        "\u8bf7\u6c42\u8fc7\u4e8e\u9891\u7e41",
+        "\u4f60\u7684\u8bf7\u6c42\u8fc7\u4e8e\u9891\u7e41",
+        "\u6682\u65f6\u9650\u5236\u4f60\u8bbf\u95ee\u5bf9\u8bdd\u8bb0\u5f55",
+        "\u8bf7\u7a0d\u7b49\u51e0\u5206\u949f\u540e\u518d\u91cd\u8bd5",
+        "too frequent",
+        "too many requests",
+    ]
+
+    if not any(keyword in normalized for keyword in rate_limit_keywords):
+        return None
+
+    return {
+        "raw_message": extract_rate_limit_message(text),
         "detected_at": now_iso(),
     }
 
@@ -102,6 +122,30 @@ def extract_limit_message(text: str) -> str:
         "you've hit",
         "hit the plus plan limit",
         "limit for image generations",
+    ]
+
+    start_idx = -1
+    for candidate in candidates:
+        start_idx = lower_text.find(candidate)
+        if start_idx >= 0:
+            break
+
+    if start_idx < 0:
+        return normalized[:600]
+
+    end_idx = min(len(normalized), start_idx + 600)
+    return normalized[start_idx:end_idx]
+
+
+def extract_rate_limit_message(text: str) -> str:
+    normalized = " ".join(text.split())
+    lower_text = normalized.lower()
+
+    candidates = [
+        "\u8bf7\u6c42\u8fc7\u4e8e\u9891\u7e41",
+        "\u4f60\u7684\u8bf7\u6c42\u8fc7\u4e8e\u9891\u7e41",
+        "too frequent",
+        "too many requests",
     ]
 
     start_idx = -1
