@@ -3,6 +3,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
+from utils.logger import logger
 from utils.path_utils import safe_filename
 from utils.selenium_utils import find_all, safe_click, wait_clickable, wait_visible
 
@@ -102,7 +103,7 @@ def open_current_chat_options_menu(driver, timeout=30):
 
 
 def click_rename_menu_item(driver, timeout=10):
-    print("Clicking rename menu item...")
+    logger.info("Clicking rename menu item...")
 
     xpath_list = [
         f"//div[@role='menu']//div[@role='menuitem' and contains(normalize-space(.), '{RENAME_TEXT}')]",
@@ -119,7 +120,7 @@ def click_rename_menu_item(driver, timeout=10):
                 try:
                     if item.is_displayed() and item.is_enabled():
                         safe_click(item, driver=d)
-                        print("Rename menu item clicked")
+                        logger.info("Rename menu item clicked")
                         return True
                 except Exception:
                     continue
@@ -165,7 +166,7 @@ def wait_chat_title_updated(driver, new_title, timeout=10):
 
 
 def rename_current_chat(driver, new_title):
-    print(f"Renaming chat to: {new_title}")
+    logger.info(f"Renaming chat to: {new_title}")
 
     new_title = safe_filename(new_title, max_len=100)
 
@@ -175,12 +176,11 @@ def rename_current_chat(driver, new_title):
         set_sidebar_rename_editor_text(driver, new_title, timeout=10)
 
         if wait_chat_title_updated(driver, new_title, timeout=10):
-            print("Rename confirmed")
+            logger.info("Rename confirmed")
         else:
-            print("Rename attempted, but title update was not confirmed")
-
+            logger.warning(f"Rename attempted, but title update was not confirmed: title={new_title}")
         return True
 
     except Exception as e:
-        print(f"Warning: failed to rename chat: {e}")
+        logger.warning(f"Failed to rename chat: {type(e).__name__}: {e}")
         return False

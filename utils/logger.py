@@ -1,5 +1,6 @@
 import sys
 import logging
+import os
 
 from datetime import datetime
 from typing import Union
@@ -38,11 +39,11 @@ class Logger:
         """
         Output log
         :param message: log message
-        :param level: log level(1: INFO, 2: WARNING, 3: ERROR, 4: CRITICAL)
+        :param level: log level(0: DEBUG, 1: INFO, 2: WARNING, 3: ERROR, 4: CRITICAL)
         :return: None
         """
         # If raw_print is True, output log to logger box
-        if level < 1 or level > 4:
+        if level < 0 or level > 4:
             raise ValueError("Invalid log level")
 
         if raw_print:
@@ -54,16 +55,16 @@ class Logger:
         while len(logging.root.handlers) > 0:
             logging.root.handlers.pop()
 
-        levels_str = ["INFO", "WARNING", "ERROR", "CRITICAL"]
+        levels_str = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
         # If logger signal is not None, output log to logger signal
         # else output log to console
-        levels_color = ["#2d8cf0", "#ff9900", "#ed3f14", "#3e0480"]
+        levels_color = ["#808695", "#2d8cf0", "#ff9900", "#ed3f14", "#3e0480"]
         if self.logger_signal is not None:
-            self.logs += f"{levels_str[level - 1]} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {message}"
-            self.logger_signal.emit(level, message)
+            self.logs += f"{levels_str[level]} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {message}"
+            self.logger_signal.emit(level if level > 0 else 1, message)
         else:
-            console.print(f'[{levels_color[level - 1]}]'
-                          f'{levels_str[level - 1]} |'
+            console.print(f'[{levels_color[level]}]'
+                          f'{levels_str[level]} |'
                           f' {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} |'
                           f' {escape(message)}[/]', soft_wrap=True)
 
@@ -74,6 +75,17 @@ class Logger:
         Output info log
         """
         self.__out__(message, 1)
+
+    def debug(self, message: str) -> None:
+        """
+        :param message: log message
+
+        Output debug log when AUTO_CHATGPT_DEBUG is enabled.
+        """
+        if os.environ.get("AUTO_CHATGPT_DEBUG", "").strip().lower() not in {"1", "true", "yes", "on"}:
+            return
+
+        self.__out__(message, 0)
 
     def warning(self, message: str) -> None:
         """

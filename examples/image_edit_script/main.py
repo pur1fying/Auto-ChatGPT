@@ -7,6 +7,7 @@ from chatgpt_page.message import set_prompt_and_image, send_message
 from chatgpt_page.response import (
     wait_full_response_flow_from_snapshot,
     get_chat_turn_cnts,
+    get_latest_assistant_text,
 )
 from chatgpt_page.dialogs import RequestTooFrequentError
 from chatgpt_page.sidebar.rename import rename_current_chat
@@ -29,6 +30,60 @@ from examples.image_edit_script.memory.result_detector import (
 
 ProcessResult = Literal["done", "skipped", "stop"]
 OutputLocation = Literal["source", "output"]
+
+
+class ConsecutiveSkipLogger:
+    def __init__(self) -> None:
+        self.reason_key: str | None = None
+        self.reason_message = ""
+        self.start_idx = 0
+        self.end_idx = 0
+        self.total = 0
+        self.count = 0
+        self.first_path: Path | None = None
+        self.last_path: Path | None = None
+
+    def record(self, idx: int, total: int, relative_path: Path, reason_key: str, reason_message: str) -> None:
+        task_no = idx + 1
+        if self.reason_key is not None and self.reason_key != reason_key:
+            self.flush()
+
+        if self.reason_key is None:
+            self.reason_key = reason_key
+            self.reason_message = reason_message
+            self.start_idx = task_no
+            self.first_path = relative_path
+            self.count = 0
+
+        self.end_idx = task_no
+        self.total = total
+        self.count += 1
+        self.last_path = relative_path
+
+    def flush(self) -> None:
+        if self.reason_key is None:
+            return
+
+        if self.count == 1:
+            logger.info(
+                f"Skip task {self.start_idx}/{self.total}: "
+                f"{self.first_path}, reason={self.reason_message}"
+            )
+        else:
+            logger.info(
+                f"Skip tasks {self.start_idx}-{self.end_idx}/{self.total}: "
+                f"{self.count} images, {self.first_path} -> {self.last_path}, "
+                f"reason={self.reason_message}"
+            )
+
+        self.reason_key = None
+        self.reason_message = ""
+        self.start_idx = 0
+        self.end_idx = 0
+        self.total = 0
+        self.count = 0
+        self.first_path = None
+        self.last_path = None
 
 
 def get_output_location(output_image_location: str) -> OutputLocation:
@@ -57,8 +112,26 @@ def rename_task_chat(driver, relative_path: Path, delay: HumanDelay | None = Non
         delay.sleep("after_rename", "after chat rename")
 
 
-def mark_rate_limited_and_stop(driver, result: ImageEditResult, image_path: Path, relative_path: Path) -> ProcessResult:
-    rate_limit_info = detect_request_too_frequent(get_page_text(driver)) or {
+def get_failure_text_context(driver, page_text: str | None = None) -> dict[str, str]:
+    if page_text is None:
+        page_text = get_page_text(driver)
+
+    return {
+        "gpt_response_text": get_latest_assistant_text(driver),
+        "page_text_excerpt": page_text,
+    }
+
+
+def mark_rate_limited_and_stop(
+    driver,
+    result: ImageEditResult,
+    image_path: Path,
+    relative_path: Path,
+    *,
+    page_text: str | None = None,
+) -> ProcessResult:
+    context = get_failure_text_context(driver, page_text=page_text)
+    rate_limit_info = detect_request_too_frequent(context["page_text_excerpt"]) or {
         "raw_message": "Request too frequent dialog detected.",
         "detected_at": ImageEditResult.now_iso(),
     }
@@ -69,8 +142,43 @@ def mark_rate_limited_and_stop(driver, result: ImageEditResult, image_path: Path
         image_path=image_path,
         relative_path=relative_path,
         rate_limit_info=rate_limit_info,
+        **context,
     )
     return "stop"
+
+
+def should_skip_task(
+    result: ImageEditResult,
+    image_path: Path,
+    *,
+    skip_policy_failed: bool,
+) -> tuple[bool, Dict[str, Any] | None]:
+    if not result.is_already_processed(image_path, include_policy_failed=skip_policy_failed):
+        return False, None
+    return True, result.get_task_record(image_path)
+
+
+def get_processed_skip_reason(record: Dict[str, Any] | None) -> tuple[str, str]:
+    status = record.get("status") if record else None
+    if status == "policy_failed":
+        return "processed:policy_failed", "previous result was policy_failed"
+
+    return f"processed:{status}", f"already processed, status={status}"
+
+
+def record_skip(
+    skip_logger: ConsecutiveSkipLogger | None,
+    idx: int,
+    total: int,
+    relative_path: Path,
+    reason_key: str,
+    reason_message: str,
+) -> None:
+    if skip_logger is None:
+        logger.info(f"Skip task {idx + 1}/{total}: {relative_path}, reason={reason_message}")
+        return
+
+    skip_logger.record(idx, total, relative_path, reason_key, reason_message)
 
 
 def process_single_image(
@@ -84,13 +192,10 @@ def process_single_image(
     save_dir: Path,
     delay: HumanDelay | None = None,
     skip_policy_failed: bool = True,
+    skip_logger: ConsecutiveSkipLogger | None = None,
 ) -> ProcessResult:
-    logger.info(f"Task : {idx + 1}/{total}")
-
     image_path = Path(task["image_path"]).resolve()
     relative_path = get_relative_path(image_path, image_root_dir)
-
-    logger.info(f"Img  : {relative_path}")
 
     task_output_dir, output_base_name = get_task_output_target(
         image_path,
@@ -101,24 +206,22 @@ def process_single_image(
     )
     task_output_dir.mkdir(parents=True, exist_ok=True)
 
-    if result.is_already_processed(image_path, include_policy_failed=skip_policy_failed):
-        record = result.get_task_record(image_path)
-        status = record.get("status")
-        if status == "policy_failed":
-            logger.info("Skip task : previous result was policy_failed")
-        else:
-            logger.info(f"Skip task : already processed, status={status}")
+    skip_task, record = should_skip_task(result, image_path, skip_policy_failed=skip_policy_failed)
+    if skip_task:
+        reason_key, reason_message = get_processed_skip_reason(record)
+        record_skip(skip_logger, idx, total, relative_path, reason_key, reason_message)
         if output_location == "source":
             result.sync_output_png_to_source_dir(
                 image_path,
                 record=record,
                 source_root_dir=image_root_dir,
                 overwrite=False,
+                log=False,
             )
         return "skipped"
 
     if result.has_existing_output_image(task_output_dir, output_base_name):
-        logger.info("Skip task : output image already exists")
+        record_skip(skip_logger, idx, total, relative_path, "existing_output", "output image already exists")
 
         result.mark_existing_output_as_success(
             image_path=image_path,
@@ -131,17 +234,24 @@ def process_single_image(
                 image_path,
                 source_root_dir=image_root_dir,
                 overwrite=False,
+                log=False,
             )
         return "skipped"
 
     if image_path.name.lower().startswith("final"):
-        logger.info("Skip task : image name starts with 'final'")
+        record_skip(skip_logger, idx, total, relative_path, "final_name", "image name starts with 'final'")
 
         result.mark_final_name_as_success(
             image_path=image_path,
             relative_path=relative_path,
         )
         return "skipped"
+
+    if skip_logger is not None:
+        skip_logger.flush()
+
+    logger.info(f"Task : {idx + 1}/{total}")
+    logger.info(f"Img  : {relative_path}")
 
     try:
         if delay is not None:
@@ -164,14 +274,16 @@ def process_single_image(
     except Exception as e:
         message = f"{type(e).__name__}: {e}"
         logger.warning(f"Task setup/send failed: {message}")
+        page_text = get_page_text(driver)
 
-        if isinstance(e, RequestTooFrequentError) or detect_request_too_frequent(get_page_text(driver)):
-            return mark_rate_limited_and_stop(driver, result, image_path, relative_path)
+        if isinstance(e, RequestTooFrequentError) or detect_request_too_frequent(page_text):
+            return mark_rate_limited_and_stop(driver, result, image_path, relative_path, page_text=page_text)
 
         result.mark_unknown_failed(
             image_path=image_path,
             relative_path=relative_path,
             message=message,
+            **get_failure_text_context(driver, page_text=page_text),
         )
 
         try:
@@ -189,10 +301,11 @@ def process_single_image(
         return mark_rate_limited_and_stop(driver, result, image_path, relative_path)
 
     page_text = get_page_text(driver)
+    failure_context = get_failure_text_context(driver, page_text=page_text)
 
     rate_limit_info = detect_request_too_frequent(page_text)
     if rate_limit_info:
-        return mark_rate_limited_and_stop(driver, result, image_path, relative_path)
+        return mark_rate_limited_and_stop(driver, result, image_path, relative_path, page_text=page_text)
 
     limit_info = detect_limit_reached(page_text)
     if limit_info:
@@ -203,6 +316,7 @@ def process_single_image(
             image_path=image_path,
             relative_path=relative_path,
             limit_info=limit_info,
+            **failure_context,
         )
 
         logger.info("<<< Image generation limit reached >>>")
@@ -220,6 +334,7 @@ def process_single_image(
             image_path=image_path,
             relative_path=relative_path,
             policy_reason=policy_reason,
+            **failure_context,
         )
 
         rename_task_chat(driver, relative_path, delay=delay)
@@ -232,6 +347,7 @@ def process_single_image(
             image_path=image_path,
             relative_path=relative_path,
             message="Response flow failed.",
+            **failure_context,
         )
         return "done"
 
@@ -263,10 +379,67 @@ def process_single_image(
         image_path=image_path,
         relative_path=relative_path,
         message="No generated image was saved, and no known failure reason was detected.",
+        **failure_context,
     )
 
     rename_task_chat(driver, relative_path, delay=delay)
     return "done"
+
+
+def run_batch(
+    tasks: list[Dict[str, Any]],
+    result_manager: ImageEditResult,
+    *,
+    output_location: OutputLocation,
+    image_root_dir: str,
+    save_dir: Path,
+    delay: HumanDelay,
+    skip_policy_failed: bool,
+) -> None:
+    script_chrome_profile = Path(config.get("chrome.profile_dir", "config/test_profile"))
+    chrome_version_main = int(config.get("chrome.version_main", 147))
+    driver_exe_path = config.get("chrome.driver_exe_path")
+
+    driver = create_driver(
+        profile_dir=script_chrome_profile,
+        version_main=chrome_version_main,
+        driver_exe_path=driver_exe_path,
+    )
+
+    try:
+        logger.info("Open chatgpt.com")
+        driver.get("https://chatgpt.com")
+
+        wait_for_login(driver)
+
+        skip_logger = ConsecutiveSkipLogger()
+
+        for idx, task in enumerate(tasks):
+            result = process_single_image(
+                driver=driver,
+                task=task,
+                idx=idx,
+                total=len(tasks),
+                result=result_manager,
+                output_location=output_location,
+                image_root_dir=image_root_dir,
+                save_dir=save_dir,
+                delay=delay,
+                skip_policy_failed=skip_policy_failed,
+                skip_logger=skip_logger,
+            )
+
+            if result == "stop":
+                skip_logger.flush()
+                break
+
+            if result == "done":
+                delay.sleep("between_tasks", f"completed task {idx + 1}")
+
+        skip_logger.flush()
+
+    finally:
+        driver.quit()
 
 
 if __name__ == "__main__":
@@ -287,41 +460,12 @@ if __name__ == "__main__":
     result_manager = ImageEditResult(result_json_path)
     tasks = init_tasks(image_root_dir, fixed_prompt)
 
-    script_chrome_profile = Path(config.get("chrome.profile_dir", "config/test_profile"))
-    chrome_version_main = int(config.get("chrome.version_main", 147))
-    driver_exe_path = config.get("chrome.driver_exe_path")
-
-    driver = create_driver(
-        profile_dir=script_chrome_profile,
-        version_main=chrome_version_main,
-        driver_exe_path=driver_exe_path,
+    run_batch(
+        tasks,
+        result_manager,
+        output_location=output_location,
+        image_root_dir=image_root_dir,
+        save_dir=save_dir,
+        delay=delay,
+        skip_policy_failed=skip_policy_failed,
     )
-
-    try:
-        logger.info("Open chatgpt.com")
-        driver.get("https://chatgpt.com")
-
-        wait_for_login(driver)
-
-        for idx, task in enumerate(tasks):
-            result = process_single_image(
-                driver=driver,
-                task=task,
-                idx=idx,
-                total=len(tasks),
-                result=result_manager,
-                output_location=output_location,
-                image_root_dir=image_root_dir,
-                save_dir=save_dir,
-                delay=delay,
-                skip_policy_failed=skip_policy_failed,
-            )
-
-            if result == "stop":
-                break
-
-            if result == "done":
-                delay.sleep("between_tasks", f"completed task {idx + 1}")
-
-    finally:
-        driver.quit()

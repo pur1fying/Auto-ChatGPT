@@ -6,6 +6,7 @@ from urllib.parse import urlparse, parse_qs
 from selenium.webdriver.common.by import By
 
 from chatgpt_page.response import get_latest_chat_assistant_turn
+from utils.logger import logger
 from utils.path_utils import safe_filename
 
 
@@ -103,7 +104,7 @@ def read_image_by_browser(driver, img):
         return None, None
 
     if isinstance(result, dict) and result.get("error"):
-        print(
+        logger.warning(
             "Browser fetch failed: "
             f"status={result.get('status')}, "
             f"contentType={result.get('contentType')}, "
@@ -162,7 +163,7 @@ def collect_candidate_images(last_turn):
             src_key = get_img_src_key(src)
 
             if src_key in seen_src_keys:
-                print(f"Skip duplicated image src: {src_key}")
+                logger.debug(f"Skip duplicated image src: {src_key}")
                 continue
 
             seen_src_keys.add(src_key)
@@ -192,13 +193,13 @@ def save_generated_images(driver, save_dir, task_index, base_name=None):
         last_turn = get_latest_chat_assistant_turn(driver)
 
         if last_turn is None:
-            print("No assistant turns found")
+            logger.warning("No assistant turns found while saving generated images")
             return saved_paths
 
         images = collect_candidate_images(last_turn)
 
         if not images:
-            print("No generated images found in latest assistant turn")
+            logger.warning("No generated images found in latest assistant turn")
             return saved_paths
 
         if base_name is None:
@@ -213,13 +214,13 @@ def save_generated_images(driver, save_dir, task_index, base_name=None):
             img_data, ext = read_image_by_browser(driver, img)
 
             if img_data is None:
-                print("Failed to read image from browser context")
+                logger.warning("Failed to read image from browser context")
                 continue
 
             img_hash = hashlib.sha256(img_data).hexdigest()
 
             if img_hash in seen_hashes:
-                print("Skip duplicated image content")
+                logger.debug("Skip duplicated image content")
                 continue
 
             seen_hashes.add(img_hash)
@@ -237,13 +238,13 @@ def save_generated_images(driver, save_dir, task_index, base_name=None):
 
             saved_paths.append(path.resolve())
             saved_count += 1
-            print(f"Saved: {path}")
+            logger.info(f"Saved generated image: {path}")
 
         if saved_count == 0:
-            print("No image was saved from latest assistant turn")
+            logger.warning("No image was saved from latest assistant turn")
 
         return saved_paths
 
     except Exception as e:
-        print(f"Error saving images: {e}")
+        logger.error(f"Error saving images: {type(e).__name__}: {e}")
         return saved_paths

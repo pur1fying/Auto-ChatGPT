@@ -35,6 +35,39 @@ class ImageEditResult:
         return datetime.now().isoformat(timespec="seconds")
 
     @staticmethod
+    def make_text_snapshot(text: Optional[str], max_len: int = 4000) -> str:
+        if not text:
+            return ""
+
+        normalized = "\n".join(line.rstrip() for line in str(text).splitlines()).strip()
+        if len(normalized) <= max_len:
+            return normalized
+
+        return normalized[:max_len].rstrip()
+
+    @classmethod
+    def make_failure_text_extra(
+        cls,
+        *,
+        gpt_response_text: Optional[str] = None,
+        page_text_excerpt: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        extra: Dict[str, Any] = {}
+
+        if gpt_response_text is not None:
+            text = cls.make_text_snapshot(gpt_response_text)
+            extra["gpt_response_text"] = text
+            extra["gpt_response_text_length"] = len(gpt_response_text or "")
+            extra["gpt_response_captured_at"] = cls.now_iso()
+
+        if page_text_excerpt is not None:
+            page_text = cls.make_text_snapshot(page_text_excerpt)
+            extra["page_text_excerpt"] = page_text
+            extra["page_text_excerpt_length"] = len(page_text_excerpt or "")
+
+        return extra
+
+    @staticmethod
     def make_image_key(image_path: Path) -> str:
         return str(Path(image_path).resolve())
 
@@ -229,22 +262,26 @@ class ImageEditResult:
         record: Optional[Dict[str, Any]] = None,
         source_root_dir: Optional[Path] = None,
         overwrite: bool = False,
+        log: bool = True,
     ) -> Optional[Path]:
+        info_log = logger.info if log else logger.debug
+        warning_log = logger.warning if log else logger.debug
+
         if record is None:
             record = self.get_task_record(image_path)
 
         if not record:
-            logger.warning(f"Skip sync output png: result record not found, image={image_path}")
+            warning_log(f"Skip sync output png: result record not found, image={image_path}")
             return None
 
         status = self.status_from_value(record.get("status"))
         if status != ProcessStatus.SUCCESS:
-            logger.info(f"Skip sync output png: status={record.get('status')}")
+            info_log(f"Skip sync output png: status={record.get('status')}")
             return None
 
         output_pngs = self.list_record_output_pngs(record)
         if not output_pngs:
-            logger.warning(f"Skip sync output png: no output png found, image={image_path}")
+            warning_log(f"Skip sync output png: no output png found, image={image_path}")
             return None
 
         source_path = self.find_current_source_image_path(
@@ -255,10 +292,10 @@ class ImageEditResult:
         synced_path.parent.mkdir(parents=True, exist_ok=True)
 
         if synced_path.exists() and not overwrite:
-            logger.info(f"Skip sync output png: target already exists, target={synced_path}")
+            info_log(f"Skip sync output png: target already exists, target={synced_path}")
         else:
             shutil.copy2(output_pngs[0], synced_path)
-            logger.info(f"Synced output png: {output_pngs[0]} -> {synced_path}")
+            info_log(f"Synced output png: {output_pngs[0]} -> {synced_path}")
 
         return synced_path
 
@@ -405,16 +442,22 @@ class ImageEditResult:
         relative_path: Path,
         *,
         policy_reason: str,
+        gpt_response_text: Optional[str] = None,
+        page_text_excerpt: Optional[str] = None,
     ) -> None:
+        extra = self.make_failure_text_extra(
+            gpt_response_text=gpt_response_text,
+            page_text_excerpt=page_text_excerpt,
+        )
+        extra["policy_reason"] = policy_reason
+
         self.update_task_result(
             image_path,
             status=ProcessStatus.POLICY_FAILED,
             message="Unable to generate target image because the generated image may violate content policies.",
             relative_path=relative_path,
             output_images=[],
-            extra={
-                "policy_reason": policy_reason,
-            },
+            extra=extra,
         )
 
     def mark_limit_reached(
@@ -423,8 +466,15 @@ class ImageEditResult:
         relative_path: Path,
         *,
         limit_info: Dict[str, Any],
+        gpt_response_text: Optional[str] = None,
+        page_text_excerpt: Optional[str] = None,
     ) -> None:
         self.data["limit_info"] = limit_info
+        extra = self.make_failure_text_extra(
+            gpt_response_text=gpt_response_text,
+            page_text_excerpt=page_text_excerpt,
+        )
+        extra["limit_info"] = limit_info
 
         self.update_task_result(
             image_path,
@@ -432,9 +482,7 @@ class ImageEditResult:
             message="Plus plan image generation limit reached. Program stopped here.",
             relative_path=relative_path,
             output_images=[],
-            extra={
-                "limit_info": limit_info,
-            },
+            extra=extra,
         )
 
     def mark_rate_limited(
@@ -443,8 +491,15 @@ class ImageEditResult:
         relative_path: Path,
         *,
         rate_limit_info: Dict[str, Any],
+        gpt_response_text: Optional[str] = None,
+        page_text_excerpt: Optional[str] = None,
     ) -> None:
         self.data["rate_limit_info"] = rate_limit_info
+        extra = self.make_failure_text_extra(
+            gpt_response_text=gpt_response_text,
+            page_text_excerpt=page_text_excerpt,
+        )
+        extra["rate_limit_info"] = rate_limit_info
 
         self.update_task_result(
             image_path,
@@ -452,9 +507,7 @@ class ImageEditResult:
             message="Request too frequent. Program stopped here to avoid triggering more rate limits.",
             relative_path=relative_path,
             output_images=[],
-            extra={
-                "rate_limit_info": rate_limit_info,
-            },
+            extra=extra,
         )
 
     def mark_unknown_failed(
@@ -463,10 +516,18 @@ class ImageEditResult:
         relative_path: Path,
         *,
         message: str,
+        gpt_response_text: Optional[str] = None,
+        page_text_excerpt: Optional[str] = None,
     ) -> None:
+        extra = self.make_failure_text_extra(
+            gpt_response_text=gpt_response_text,
+            page_text_excerpt=page_text_excerpt,
+        )
+
         self.update_task_result(
             image_path,
             status=ProcessStatus.UNKNOWN_FAILED,
             message=message,
             relative_path=relative_path,
+            extra=extra,
         )

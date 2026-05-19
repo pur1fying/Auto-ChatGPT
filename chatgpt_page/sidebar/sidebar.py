@@ -1,5 +1,6 @@
 from selenium.webdriver.common.by import By
 from utils.selenium_utils import wait_first_visible
+from utils.logger import logger
 
 
 def get_sidebar_chat_items(driver):
@@ -125,13 +126,13 @@ def get_sidebar_chat_options_button(driver, chat_item):
 
 def print_sidebar_chats(driver, limit=20):
     """
-    Debug helper: print sidebar conversation titles.
+    Debug helper: log sidebar conversation titles.
     """
     items = get_sidebar_chat_items(driver)
 
-    print(f"Sidebar chat count: {len(items)}")
+    logger.info(f"Sidebar chat count: {len(items)}")
 
     for idx, item in enumerate(items[:limit]):
         title = get_sidebar_chat_title(item)
         href = get_sidebar_chat_href(item)
-        print(f"{idx + 1}. {title} | {href}")
+        logger.debug(f"Sidebar chat {idx + 1}: {title} | {href}")
